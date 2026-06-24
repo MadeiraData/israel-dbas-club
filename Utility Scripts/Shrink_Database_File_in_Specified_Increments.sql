@@ -19,6 +19,7 @@ Description:
 ----------------------------------------------------------------------------
 
 Change log:
+	2026-06-24 - Eitan - Added new parameter: @RegrowOnRetry
 	2025-06-18 - Eitan - Added new parameters: @MaxActiveTranLogSizeMB, @MaxActiveTranLogSizePct, and @ActiveTranLogSeverity
 	2024-09-29 - Vitaly - Added a time limit (maximum execution duration) for the process (@TimeLimit and @RunStartTime parameters) 
 	2021-09-17 - Eitan - Renamed @MinPercentFree to @MaxPercentUsed, some code-quality fixes
@@ -43,14 +44,15 @@ DECLARE
 	,@MaxPercentUsed	INT	= 80		-- Leave NULL to rely on @TargetSizeMB exclusively.
 								-- Either @TargetSizeMB or @MaxPercentUsed must be specified.
 								-- If both @TargetSizeMB and @MaxPercentUsed are provided, the largest of them will be used.
-	,@IntervalMB		INT	= 50		-- Leave NULL to shrink the file in a single interval
+	,@IntervalMB			INT	= 50		-- Leave NULL to shrink the file in a single interval
 	,@DelayBetweenShrinks	VARCHAR(12) = '00:00:01' -- Delay to wait between shrink iterations (in 'hh:mm[[:ss].mss]' format). Leave NULL to disable delay. For more info, see the 'time_to_execute' argument of WAITFOR DELAY: https://docs.microsoft.com/sql/t-sql/language-elements/waitfor-transact-sql#arguments
 	,@IterationMaxRetries	INT	= 3		-- Maximum number of attempts per iteration to shrink a file, when cannot successfuly shrink to desired target size
-	,@RegrowOnError5240	BIT	= 1		-- Error 5240 may be resolved by temporarily increasing the file size before shrinking it again.
+	,@RegrowOnError5240		BIT	= 1		-- Error 5240 may be resolved by temporarily increasing the file size before shrinking it again.
+	,@RegrowOnRetry			BIT = 1		-- Inability to shrink may be resolved by temporarily increasing the file size before shrinking it again.
 
-	,@AGReplicaLinkedServer	SYSNAME	= NULL		-- Linked Server name of the AG replica to check. Leave as NULL to ignore.
-	,@MaxReplicaRecoveryQueue INT	= 10000		-- Maximum recovery queue of AG replica (in KB). Use this to prevent overload on the AG.
-	,@RecoveryQueueSeverity INT	= 16		-- Error severity to raise when @MaxReplicaRecoveryQueue is breached.
+	,@AGReplicaLinkedServer		SYSNAME	= NULL		-- Linked Server name of the AG replica to check. Leave as NULL to ignore.
+	,@MaxReplicaRecoveryQueue	INT	= 10000		-- Maximum recovery queue of AG replica (in KB). Use this to prevent overload on the AG.
+	,@RecoveryQueueSeverity		INT	= 16		-- Error severity to raise when @MaxReplicaRecoveryQueue is breached.
 
 	,@MaxActiveTranLogSizeMB	INT = NULL		-- Maximum active log size (in MB). Use this to prevent overload on the transaction log or on the AG. Leave as NULL to ignore.
 	,@MaxActiveTranLogSizePct	INT = NULL		-- Maximum active log size (in Percent). Use this to prevent overload on the transaction log or on the AG. Leave as NULL to ignore.
@@ -58,7 +60,7 @@ DECLARE
 
 	,@TimeLimit					INT 		= 86400				-- Set a maximum execution duration in second (3600 = 1 hour / 86400 = 24 hours) / NULL - no limmit!
 
-	,@WhatIf		BIT	= 0		-- Set to 1 to only print the commands but not run them.
+	,@WhatIf					BIT	= 0		-- Set to 1 to only print the commands but not run them.
 
 ----------------------------------------------------------------------------
 		-- DON'T CHANGE ANYTHING BELOW THIS LINE --
@@ -306,6 +308,17 @@ BEGIN
 				SET @RetryNum = @RetryNum + 1;
 				SET @CurrSizeMB = @NewSizeMB;
 				RAISERROR(N'-- Unable to shrink below %d MB. Retry attempt %d...', 0, 1, @NewSizeMB, @RetryNum) WITH NOWAIT;
+
+				IF @RegrowOnRetry = 1
+				BEGIN
+					-- This error can be solved by increasing the file size a bit before shrinking again
+					SET @CMD = N'ALTER DATABASE ' + QUOTENAME(@DatabaseName) + N' MODIFY FILE (NAME = ' + QUOTENAME(@FileName, N'''') + N', SIZE = ' + CONVERT(nvarchar(1000), @CurrSizeMB + @IntervalMB) + N'MB); -- ' + CONVERT(nvarchar(25),GETDATE(),121)
+			
+					PRINT N'-- Regrowing:'
+					RAISERROR(N'%s',0,1,@CMD) WITH NOWAIT;
+			
+					EXEC @sp_executesql @CMD
+				END
 			END
 		END
 		ELSE
