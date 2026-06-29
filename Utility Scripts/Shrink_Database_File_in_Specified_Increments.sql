@@ -19,6 +19,7 @@ Description:
 ----------------------------------------------------------------------------
 
 Change log:
+	2026-06-29 - Eitan - Added new parameter: @RegrowIntervalMB
 	2026-06-24 - Eitan - Added new parameter: @RegrowOnRetry
 	2025-06-18 - Eitan - Added new parameters: @MaxActiveTranLogSizeMB, @MaxActiveTranLogSizePct, and @ActiveTranLogSeverity
 	2024-09-29 - Vitaly - Added a time limit (maximum execution duration) for the process (@TimeLimit and @RunStartTime parameters) 
@@ -49,6 +50,7 @@ DECLARE
 	,@IterationMaxRetries	INT	= 3		-- Maximum number of attempts per iteration to shrink a file, when cannot successfuly shrink to desired target size
 	,@RegrowOnError5240		BIT	= 1		-- Error 5240 may be resolved by temporarily increasing the file size before shrinking it again.
 	,@RegrowOnRetry			BIT = 1		-- Inability to shrink may be resolved by temporarily increasing the file size before shrinking it again.
+	,@RegrowIntervalMB		INT	= NULL	-- Determine by which interval to re-grow the file upon retry. Set to NULL to use same value as @IntervalMB.
 
 	,@AGReplicaLinkedServer		SYSNAME	= NULL		-- Linked Server name of the AG replica to check. Leave as NULL to ignore.
 	,@MaxReplicaRecoveryQueue	INT	= 10000		-- Maximum recovery queue of AG replica (in KB). Use this to prevent overload on the AG.
@@ -96,6 +98,14 @@ BEGIN
 	RAISERROR(N'@IntervalMB must be an integer value of 1 or higher (or NULL if you want to shrink using a single interval)', 16,1)
 	GOTO Quit;
 END
+
+IF @RegrowIntervalMB < 1
+BEGIN
+	RAISERROR(N'@RegrowIntervalMB must be an integer value of 1 or higher (or NULL if you want to use same value as @IntervalMB)', 16,1)
+	GOTO Quit;
+END
+
+SET @RegrowIntervalMB = ISNULL(@RegrowIntervalMB, @IntervalMB);
 
 SET @sp_executesql = QUOTENAME(@DatabaseName) + '..sp_executesql'
 
@@ -280,7 +290,7 @@ BEGIN
 			IF @RegrowOnError5240 = 1 AND ERROR_NUMBER() = 5240
 			BEGIN
 				-- This error can be solved by increasing the file size a bit before shrinking again
-				SET @CMD = N'ALTER DATABASE ' + QUOTENAME(@DatabaseName) + N' MODIFY FILE (NAME = ' + QUOTENAME(@FileName, N'''') + N', SIZE = ' + CONVERT(nvarchar(1000), @CurrSizeMB + @IntervalMB) + N'MB); -- ' + CONVERT(nvarchar(25),GETDATE(),121)
+				SET @CMD = N'ALTER DATABASE ' + QUOTENAME(@DatabaseName) + N' MODIFY FILE (NAME = ' + QUOTENAME(@FileName, N'''') + N', SIZE = ' + CONVERT(nvarchar(1000), @CurrSizeMB + @RegrowIntervalMB) + N'MB); -- ' + CONVERT(nvarchar(25),GETDATE(),121)
 			
 				PRINT N'-- Error 5240 encountered. Regrowing:'
 				RAISERROR(N'%s',0,1,@CMD) WITH NOWAIT;
@@ -312,7 +322,7 @@ BEGIN
 				IF @RegrowOnRetry = 1
 				BEGIN
 					-- This error can be solved by increasing the file size a bit before shrinking again
-					SET @CMD = N'ALTER DATABASE ' + QUOTENAME(@DatabaseName) + N' MODIFY FILE (NAME = ' + QUOTENAME(@FileName, N'''') + N', SIZE = ' + CONVERT(nvarchar(1000), @CurrSizeMB + @IntervalMB) + N'MB); -- ' + CONVERT(nvarchar(25),GETDATE(),121)
+					SET @CMD = N'ALTER DATABASE ' + QUOTENAME(@DatabaseName) + N' MODIFY FILE (NAME = ' + QUOTENAME(@FileName, N'''') + N', SIZE = ' + CONVERT(nvarchar(1000), @CurrSizeMB + @RegrowIntervalMB) + N'MB); -- ' + CONVERT(nvarchar(25),GETDATE(),121)
 			
 					PRINT N'-- Regrowing:'
 					RAISERROR(N'%s',0,1,@CMD) WITH NOWAIT;
